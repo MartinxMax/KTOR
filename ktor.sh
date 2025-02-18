@@ -104,17 +104,14 @@ check_http_service() {
     local ip=$1
     local port=$2
     local html_content title http_response
-
     html_content=$(curl -s -m 1 "http://$ip:$port" | tr -d '\0') 
     if [ $? -eq 28 ]; then
         echo -e "${RED}[-] HTTP service on $ip:$port timed out.${RESET}"
         return
     fi
-
     title=$(echo "$html_content" | grep -oP '(?<=<title>)(.*?)(?=</title>)')
     http_response=$(curl -s -o /dev/null -w "%{http_code}" -m 1 "http://$ip:$port")
-
-    if [ "$http_response" -eq 200 ]; then
+    if [[ "$http_response" =~ ^[1-5][0-9]{2}$ ]]; then
         echo -e "${GREEN}[+] HTTP service is up on $ip:$port [$title] ${RESET}"
         echo "$ip:$port - $title" >> "$log_file"  
     else
