@@ -24,6 +24,12 @@ Usage: .\ktor.ps1 [-Threads <int>] [-Interface <string>] [-Local] [-Ports <int,i
 
 if ($Help) { Show-Usage; exit }
 
+# If user specifies 'all' in Ports, scan full range 1-65535
+if ($Ports -contains 'all') {
+    Write-Output "[*] 'all' detected: scanning all ports 1-65535"
+    $Ports = 1..65535
+}
+
 $timestamp = Get-Date -Format 'yyyy-MM-dd-HHmmss'
 $logFile   = Join-Path $env:TEMP "http-$timestamp.txt"
 $Results   = @()
@@ -62,12 +68,17 @@ function Get-Title {
 }
 
 function Scan-Local {
-    Write-Output "[*] Scanning localhost ports: $($Ports -join ', ')"
+    if ($Ports.Count -eq 65535) {
+        Write-Output "[*] Scanning localhost ports: 1-65535"
+    } else {
+        Write-Output "[*] Scanning localhost ports: $($Ports -join ', ')"
+    }
+
     foreach ($p in $Ports) {
         if (Test-NetConnection -ComputerName '127.0.0.1' -Port $p -InformationLevel Quiet) {
             $url = "http://127.0.0.1:${p}/"
             try {
-                $resp = Invoke-WebRequest -Uri $url -TimeoutSec 2 -ErrorAction Stop
+                $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
                 $status = $resp.StatusCode
             } catch {
                 $status = $null
@@ -108,7 +119,7 @@ function Scan-Network {
             if (Test-NetConnection -ComputerName $ip -Port $p -InformationLevel Quiet) {
                 $url = "http://${ip}:${p}/"
                 try {
-                    $resp = Invoke-WebRequest -Uri $url -TimeoutSec 2 -ErrorAction Stop
+                    $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
                     $status = $resp.StatusCode
                 } catch {
                     $status = $null
