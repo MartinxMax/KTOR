@@ -1,22 +1,21 @@
-#!/usr/bin/env pwsh
-# Maptnh@S-H4CK13 —  KTOR
+# Maptnh@S-H4CK13 KTOR
 
 [CmdletBinding()]
 param(
-    [int]   $Threads   = 50,
-    [string]$Interface = "",
+    [int]   $Threads    = 50,
     [switch]$Local,
-    [string[]]$Ports   = @("80","443","8080"),
+    [string]$Targets    = "",
+    [string[]]$Ports    = @("80","443","8080"),
     [switch]$Help
 )
 
 function Show-Usage {
     Write-Output @"
-Usage: .\ktor.ps1 [-Threads <int>] [-Interface <string>] [-Local] [-Ports <int,int,...>] [-Help]
+Usage: .\ktor.ps1 [-Threads <int>] [-Local] [-Targets <CIDR|IP|IP,IP,...>] [-Ports <int,int,...>] [-Help]
 
   -Threads    Maximum parallel threads (default: 50)
-  -Interface  Network interface to scan (e.g. Ethernet)
   -Local      Scan only localhost (127.0.0.1)
+  -Targets    CIDR (e.g. 192.168.0.0/24 or /16), single IP (e.g. 192.168.0.1) or comma-separated list
   -Ports      Comma-separated list of ports to scan (default: 80,443,8080)
   -Help       Show this help message
 "@
@@ -24,42 +23,27 @@ Usage: .\ktor.ps1 [-Threads <int>] [-Interface <string>] [-Local] [-Ports <int,i
 
 if ($Help) { Show-Usage; exit }
 
-# If user specifies 'all' in Ports, scan full range 1-65535
-if ($Ports -contains 'all') {
-    Write-Output "[*] 'all' detected: scanning all ports 1-65535"
-    $Ports = 1..65535
-}
-
+ 
 $timestamp = Get-Date -Format 'yyyy-MM-dd-HHmmss'
 $logFile   = Join-Path $env:TEMP "http-$timestamp.txt"
 $Results   = @()
 
-# Header
-$header = @"
+$header = @'
       ___                       ___           ___     
-     /__/|          ___        /  /\         /  /\    
-    |  |:|         /  /\      /  /::\       /  /::\   
-    |  |:|        /  /:/     /  /:/\:\     /  /:/\:\  
-  __|  |:|       /  /:/     /  /:/  \:\   /  /:/~/:/  
- /__/\_|:|____  /  /::\    /__/:/ \__\:\ /__/:/ /:/___
- \  \:\/:::::/ /__/:/\:\   \  \:\ /  /:/ \  \:\/:::::/
-  \  \::/~~~~  \__\/  \:\   \  \:\  /:/   \  \::/~~~~ 
-   \  \:\           \  \:\   \  \:\/:/     \  \:\     
-    \  \:\           \__\/    \  \::/       \  \:\    
-     \__\/                     \__\/         \__\/    
-"@
+     /__/|          ___        / :/          /  /\    
+    |  |:|         /  /\      /  /:/_        /  /::\   
+    |  |:|        /  /:/     /  /:/ /\      /  /:/\:\  
+  __|  |:|       /  /:/     /  /:/_/::\    /  /:/~/:/  
+ /__\/\_|:|____ /  /::\    /__/:/__\/\:\  /__/:/ /:/___
+ \  \:/:::::/ /__/:/\:\   \  \:\ /~~/:/  \  \:\/:/:::::/
+  \  \::/~~~~  \__\/  \:\   \  \:\  /:/    \  \::/~~~~ 
+   \  \:\           \  \:\   \  \:\/:/      \  \:\     
+    \  \:\           \__\/    \  \::/        \  \:\    
+     \__\/                     \__\/          \__\/    
+'@
 Write-Output $header
 Write-Output "Maptnh@S-H4CK13   https://github.com/MartinxMax  KTOR"
 Write-Output "For Windows"
-
-function Get-SubnetPrefix {
-    param([string]$IfAlias)
-    $ip = Get-NetIPAddress -InterfaceAlias $IfAlias -AddressFamily IPv4 |
-          Where-Object { $_.IPAddress -notlike '169.*' } |
-          Select-Object -First 1 -ExpandProperty IPAddress
-    if (-not $ip) { throw "Interface '$IfAlias' has no valid IPv4 address." }
-    return ($ip -split '\.')[0..2] -join '.'
-}
 
 function Get-Title {
     param([string]$Html)
@@ -68,83 +52,107 @@ function Get-Title {
 }
 
 function Scan-Local {
-    if ($Ports.Count -eq 65535) {
-        Write-Output "[*] Scanning localhost ports: 1-65535"
-    } else {
-        Write-Output "[*] Scanning localhost ports: $($Ports -join ', ')"
-    }
-
-    foreach ($p in $Ports) {
-        if (Test-NetConnection -ComputerName '127.0.0.1' -Port $p -InformationLevel Quiet) {
-            $url = "http://127.0.0.1:${p}/"
-            try {
-                $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
-                $status = $resp.StatusCode
-            } catch {
-                $status = $null
-                Write-Output "[-] Error accessing ${url}: $($_.Exception.Message)"
-            }
-            if ($status -match '^[1-5]\d\d$') {
-                $title = Get-Title -Html $resp.Content
-                $line = "127.0.0.1:${p} - ${title}"
-                Write-Output "[+] ${line}"
-                $Results += $line
-                Add-Content -Path $logFile -Value $line
-            } else {
-                Write-Output "[-] ${url} did not return HTTP (status: ${status})"
-            }
-        } else {
-            Write-Output "[-] TCP port ${p} is closed on localhost"
+    if ($Local -and -not $PSCmdlet.MyInvocation.BoundParameters.ContainsKey('Ports')) {
+        Write-Output "[*] No ports specified. Auto-detecting listening ports via netstat..."
+        $Ports = netstat -ano |
+                 Select-String 'LISTENING' |
+                 ForEach-Object { if ($_ -match '^\s*TCP\s+\S+:(\d+)\s') { $matches[1] } } |
+                 Sort-Object -Unique
+        if (-not $Ports.Count) {
+            Write-Output "[-] No listening TCP ports found."
+            return
         }
     }
+
+    Write-Output "[*] Scanning localhost ports: $($Ports -join ',')"
+
+    foreach ($port in $Ports) {
+        try {
+            if (Test-NetConnection -ComputerName '127.0.0.1' -Port $port -InformationLevel Quiet) {
+                $url = "http://127.0.0.1:$port/"
+                $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+                if ($resp.Content -match '(?is)<title>(.*?)</title>') {
+                    $title = $Matches[1].Trim()
+                } else { $title = '' }
+                $line = "127.0.0.1:$port - HTTP detected - Title: $title"
+                Add-Content -Path $logFile -Value $line
+                Write-Output "[+] $line"
+            }
+        } catch {}
+    }
+}
+
+function Expand-CIDR {
+    param([string]$cidr)
+    $result = @()
+    if ($cidr -match '^(.+)/(\d{1,2})$') {
+        $network = $Matches[1]
+        $mask = [int]$Matches[2]
+        $octets = $network -split '\.'
+        switch ($mask) {
+            24 {
+                $prefix = "$($octets[0]).$($octets[1]).$($octets[2])"
+                $result = 1..254 | ForEach-Object { "$prefix.$_" }
+            }
+            16 {
+                $prefix2 = "$($octets[0]).$($octets[1])"
+                foreach ($i in 1..16) { foreach ($j in 1..16) { $result += "$prefix2.$i.$j" } }
+            }
+            default {
+                Write-Output "[-] Unsupported mask /$mask"
+            }
+        }
+    } else {
+        $result += $cidr
+    }
+    return $result
 }
 
 function Scan-Network {
-    param([string]$Prefix)
-    Write-Output "[*] Pinging hosts in subnet ${Prefix}.1-254..."
-    $alive = 1..254 | ForEach-Object -Parallel -ThrottleLimit $Threads {
-        $ip = "${using:Prefix}.$_"
-        if (Test-Connection -ComputerName $ip -Count 1 -Quiet -TimeoutSeconds 1) {
-            Write-Output "[+] ${ip} is alive"
-            $ip
+    param([string[]]$Hosts)
+
+    $total = $Hosts.Count * $Ports.Count
+    Write-Output "[*] Scanning ..."
+
+    $queue = foreach ($targetHost in $Hosts) {
+        foreach ($targetPort in $Ports) {
+            [PSCustomObject]@{IP = $targetHost; Port = $targetPort}
         }
     }
-    if (-not $alive) {
-        Write-Output "[-] No live hosts found."
-        return
-    }
-    $alive | ForEach-Object -Parallel -ThrottleLimit $Threads {
-        $ip = $_
-        foreach ($p in $using:Ports) {
-            if (Test-NetConnection -ComputerName $ip -Port $p -InformationLevel Quiet) {
-                $url = "http://${ip}:${p}/"
-                try {
-                    $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop
-                    $status = $resp.StatusCode
-                } catch {
-                    $status = $null
-                    Write-Output "[-] Error accessing ${url}: $($_.Exception.Message)"
-                }
-                if ($status -match '^[1-5]\d\d$') {
-                    $title = Get-Title -Html $resp.Content
-                    $line = "${ip}:${p} - ${title}"
-                    Write-Output "[+] ${line}"
-                    $Results += $line
-                    Add-Content -Path $logFile -Value $line
-                } else {
-                    Write-Output "[-] ${url} did not return HTTP (status: ${status})"
-                }
-            } else {
-                Write-Output "[-] TCP port ${p} closed on ${ip}"
+
+    foreach ($entry in $queue) {
+        try {
+            if (Test-NetConnection -ComputerName $entry.IP -Port $entry.Port -InformationLevel Quiet) {
+                $url = "http://$($entry.IP):$($entry.Port)/"
+                $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+                if ($resp.Content -match '(?is)<title>(.*?)</title>') {
+                    $title = $Matches[1].Trim()
+                } else { $title = '' }
+                $line = "$($entry.IP):$($entry.Port) - HTTP detected - Title: $title"
+                Add-Content -Path $logFile -Value $line
+                Write-Output "[+] $line"
             }
-        }
+        } catch {}
     }
 }
 
-if ($Local) { Scan-Local } else {
-    if (-not $Interface) { Write-Output "Error: Specify -Interface."; Show-Usage; exit 1 }
-    try { $prefix = Get-SubnetPrefix -IfAlias $Interface } catch { Write-Output "Error: $_"; exit 1 }
-    Scan-Network -Prefix $prefix
+if ($Local) {
+    Scan-Local
+} elseif ($Targets) {
+    $targetsList = @()
+    foreach ($t in $Targets -split ',') {
+        $targetsList += Expand-CIDR -cidr $t
+    }
+ 
+    if ($targetsList.Count -gt 4096) {
+        Write-Output "[-] Too many targets ($($targetsList.Count)). Limit to 4096 IPs."
+        exit 1
+    }
+
+    Scan-Network -Hosts $targetsList
+} else {
+    Write-Output "Error: Specify -Targets or -Local."
+    Show-Usage; exit 1
 }
 
-Write-Output "`n[+] Scan complete. Results saved to: ${logFile}"
+Write-Output "[+] Scan complete. Results saved to: $logFile"
